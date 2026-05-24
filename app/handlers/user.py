@@ -21,6 +21,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 class CheckProduct(StatesGroup):
     waiting_barcode = State()
     waiting_photo = State()
+    waiting_manual_name = State()
 
 @router.message(CommandStart())
 async def start(message: Message):
@@ -81,39 +82,90 @@ async def process_barcode(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("confirm_"))
 async def confirmed_barcode(callback: CallbackQuery, state: FSMContext):
     barcode = callback.data.replace("confirm_", "")
+    await state.update_data(barcode=barcode)
     await callback.message.edit_text("🔍 Ищем товар...")
     off_product = await search_open_food_facts(barcode)
     if not off_product or not off_product.get("name"):
-        await callback.message.edit_text("❓ Товар не найден в Open Food Facts.\nСтатус: <b>Нет данных</b>", parse_mode="HTML")
+        await callback.message.edit_text(
+            "❓ Товар не найден автоматически.\n\nВведи название товара вручную:"
+        )
+        await state.set_state(CheckProduct.waiting_manual_name)
         return
     name = off_product["name"]
-    brand = off_product["brand"]
+    brand = off_product.get("brand", "")
+    await state.update_data(name=name, brand=brand)
+    await check_and_respond(callback, state, name, brand, barcode)
+
+@router.message(CheckProduct.waiting_manual_name)
+async def process_manual_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    data = await state.get_data()
+    barcode = data.get("barcode", "")
+    brand = ""
+    await state.update_data(name=name, brand=brand)
+    await check_and_respond_message(message, state, name, brand, barcode)
+
+async def check_and_respond(callback: CallbackQuery, state: FSMContext, name: str, brand: str, barcode: str):
     product = await get_product_by_name(name, brand)
+    status_map = {
+        "halal": "✅ ХАЛАЛ",
+        "haram": "❌ ХАРАМ",
+        "doubtful": "⚠️ СОМНИТЕЛЬНО",
+        "unknown": "❓ НЕТ ДАННЫХ"
+    }
     if product:
         status = product.get("status", "unknown")
-        status_map = {
-            "halal": "✅ ХАЛАЛ",
-            "haram": "❌ ХАРАМ",
-            "doubtful": "⚠️ СОМНИТЕЛЬНО",
-            "unknown": "❓ НЕТ ДАННЫХ"
-        }
         await callback.message.edit_text(
-            f"<b>{name}</b> — {brand}\n\nСтатус: <b>{status_map.get(status, '❓ НЕТ ДАННЫХ')}</b>",
+            f"<b>{name}</b>" + (f" — {brand}" if brand else "") +
+            f"\n\nСтатус: <b>{status_map.get(status, '❓ НЕТ ДАННЫХ')}</b>",
             parse_mode="HTML"
         )
         await save_history(callback.from_user.id, barcode, name, brand, status)
     else:
         await callback.message.edit_text(
-            f"<b>{name}</b> — {brand}\n\n❓ Статус: НЕТ ДАННЫХ",
+            f"<b>{name}</b>" + (f" — {brand}" if brand else "") +
+            f"\n\n❓ Статус: НЕТ ДАННЫХ\n\nМы отправили запрос администратору.",
             parse_mode="HTML"
         )
         await save_history(callback.from_user.id, barcode, name, brand, "unknown")
         await callback.bot.send_message(
             ADMIN_ID,
             f"🔔 Новый товар без статуса!\n\n"
-            f"<b>{name}</b> — {brand}\n"
-            f"Штрихкод: <code>{barcode}</code>\n\n"
-            f"Добавь статус через /admin",
+            f"<b>{name}</b>" + (f" — {brand}" if brand else "") +
+            f"\nШтрихкод: <code>{barcode}</code>\n\n"
+            f"Добавь через /admin",
+            parse_mode="HTML"
+        )
+
+async def check_and_respond_message(message: Message, state: FSMContext, name: str, brand: str, barcode: str):
+    await state.clear()
+    product = await get_product_by_name(name, brand)
+    status_map = {
+        "halal": "✅ ХАЛАЛ",
+        "haram": "❌ ХАРАМ",
+        "doubtful": "⚠️ СОМНИТЕЛЬНО",
+        "unknown": "❓ НЕТ ДАННЫХ"
+    }
+    if product:
+        status = product.get("status", "unknown")
+        await message.answer(
+            f"<b>{name}</b>" + (f" — {brand}" if brand else "") +
+            f"\n\nСтатус: <b>{status_map.get(status, '❓ НЕТ ДАННЫХ')}</b>",
+            parse_mode="HTML"
+        )
+        await save_history(message.from_user.id, barcode, name, brand, status)
+    else:
+        await message.answer(
+            f"<b>{name}</b>" + (f" — {brand}" if brand else "") +
+            f"\n\n❓ Статус: НЕТ ДАННЫХ\n\nМы отправили запрос администратору.",
+            parse_mode="HTML"
+        )
+        await save_history(message.from_user.id, barcode, name, brand, "unknown")
+        await message.bot.send_message(
+            ADMIN_ID,
+            f"🔔 Новый товар без статуса!\n\n"
+            f"<b>{name}</b>\nШтрихкод: <code>{barcode}</code>\n\n"
+            f"Добавь через /admin",
             parse_mode="HTML"
         )
 
@@ -137,7 +189,7 @@ async def history_button(message: Message):
     status_map = {"halal": "✅", "haram": "❌", "doubtful": "⚠️", "unknown": "❓"}
     for h in history:
         emoji = status_map.get(h["status"], "❓")
-        text += f"{emoji} <b>{h['product_name']}</b> — {h.get('brand', '')}\n"
+        text += f"{emoji} <b>{h['product_name']}</b>" + (f" — {h.get('brand', '')}" if h.get('brand') else "") + "\n"
         text += f"    {h['barcode']} · {h['checked_at'].strftime('%d.%m %H:%M')}\n\n"
     await message.answer(text, parse_mode="HTML")
 
@@ -151,6 +203,6 @@ async def show_history(message: Message):
     status_map = {"halal": "✅", "haram": "❌", "doubtful": "⚠️", "unknown": "❓"}
     for h in history:
         emoji = status_map.get(h["status"], "❓")
-        text += f"{emoji} <b>{h['product_name']}</b> — {h.get('brand', '')}\n"
+        text += f"{emoji} <b>{h['product_name']}</b>" + (f" — {h.get('brand', '')}" if h.get('brand') else "") + "\n"
         text += f"    {h['barcode']} · {h['checked_at'].strftime('%d.%m %H:%M')}\n\n"
     await message.answer(text, parse_mode="HTML")
