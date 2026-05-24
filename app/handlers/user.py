@@ -1,10 +1,10 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, PhotoSize
+from aiogram.types import Message, CallbackQuery, PhotoSize, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from app.keyboards.buttons import main_menu, confirm_barcode, confirm_product
-from app.database.db import get_product_by_name, save_history, search_open_food_facts, get_user_history
+from app.keyboards.buttons import main_menu, confirm_barcode
+from app.database.db import get_product_by_name, save_history, search_open_food_facts, get_user_history, add_product
 import os
 import io
 
@@ -22,6 +22,17 @@ class CheckProduct(StatesGroup):
     waiting_barcode = State()
     waiting_photo = State()
     waiting_manual_name = State()
+
+def admin_keyboard(name: str, brand: str, user_id: int):
+    safe_name = name.replace(":", "_").replace("|", "_")[:30]
+    safe_brand = brand.replace(":", "_").replace("|", "_")[:20]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Халал", callback_data=f"setstatus:halal:{user_id}:{safe_name}:{safe_brand}"),
+            InlineKeyboardButton(text="❌ Харам", callback_data=f"setstatus:haram:{user_id}:{safe_name}:{safe_brand}"),
+            InlineKeyboardButton(text="⚠️ Сомнит.", callback_data=f"setstatus:doubtful:{user_id}:{safe_name}:{safe_brand}"),
+        ]
+    ])
 
 @router.message(CommandStart())
 async def start(message: Message):
@@ -93,52 +104,17 @@ async def confirmed_barcode(callback: CallbackQuery, state: FSMContext):
         return
     name = off_product["name"]
     brand = off_product.get("brand", "")
-    await state.update_data(name=name, brand=brand)
-    await check_and_respond(callback, state, name, brand, barcode)
+    await process_product(callback.message, callback.bot, callback.from_user.id, name, brand, barcode, state)
 
 @router.message(CheckProduct.waiting_manual_name)
 async def process_manual_name(message: Message, state: FSMContext):
     name = message.text.strip()
     data = await state.get_data()
     barcode = data.get("barcode", "")
-    brand = ""
-    await state.update_data(name=name, brand=brand)
-    await check_and_respond_message(message, state, name, brand, barcode)
-
-async def check_and_respond(callback: CallbackQuery, state: FSMContext, name: str, brand: str, barcode: str):
-    product = await get_product_by_name(name, brand)
-    status_map = {
-        "halal": "✅ ХАЛАЛ",
-        "haram": "❌ ХАРАМ",
-        "doubtful": "⚠️ СОМНИТЕЛЬНО",
-        "unknown": "❓ НЕТ ДАННЫХ"
-    }
-    if product:
-        status = product.get("status", "unknown")
-        await callback.message.edit_text(
-            f"<b>{name}</b>" + (f" — {brand}" if brand else "") +
-            f"\n\nСтатус: <b>{status_map.get(status, '❓ НЕТ ДАННЫХ')}</b>",
-            parse_mode="HTML"
-        )
-        await save_history(callback.from_user.id, barcode, name, brand, status)
-    else:
-        await callback.message.edit_text(
-            f"<b>{name}</b>" + (f" — {brand}" if brand else "") +
-            f"\n\n❓ Статус: НЕТ ДАННЫХ\n\nМы отправили запрос администратору.",
-            parse_mode="HTML"
-        )
-        await save_history(callback.from_user.id, barcode, name, brand, "unknown")
-        await callback.bot.send_message(
-            ADMIN_ID,
-            f"🔔 Новый товар без статуса!\n\n"
-            f"<b>{name}</b>" + (f" — {brand}" if brand else "") +
-            f"\nШтрихкод: <code>{barcode}</code>\n\n"
-            f"Добавь через /admin",
-            parse_mode="HTML"
-        )
-
-async def check_and_respond_message(message: Message, state: FSMContext, name: str, brand: str, barcode: str):
     await state.clear()
+    await process_product(message, message.bot, message.from_user.id, name, "", barcode, state, is_message=True)
+
+async def process_product(msg, bot, user_id: int, name: str, brand: str, barcode: str, state, is_message=False):
     product = await get_product_by_name(name, brand)
     status_map = {
         "halal": "✅ ХАЛАЛ",
@@ -146,28 +122,57 @@ async def check_and_respond_message(message: Message, state: FSMContext, name: s
         "doubtful": "⚠️ СОМНИТЕЛЬНО",
         "unknown": "❓ НЕТ ДАННЫХ"
     }
+    text = f"<b>{name}</b>" + (f" — {brand}" if brand else "")
     if product:
         status = product.get("status", "unknown")
-        await message.answer(
-            f"<b>{name}</b>" + (f" — {brand}" if brand else "") +
-            f"\n\nСтатус: <b>{status_map.get(status, '❓ НЕТ ДАННЫХ')}</b>",
-            parse_mode="HTML"
-        )
-        await save_history(message.from_user.id, barcode, name, brand, status)
+        result_text = f"{text}\n\nСтатус: <b>{status_map.get(status, '❓ НЕТ ДАННЫХ')}</b>"
+        if is_message:
+            await msg.answer(result_text, parse_mode="HTML", reply_markup=main_menu())
+        else:
+            await msg.edit_text(result_text, parse_mode="HTML")
+        await save_history(user_id, barcode, name, brand, status)
     else:
-        await message.answer(
-            f"<b>{name}</b>" + (f" — {brand}" if brand else "") +
-            f"\n\n❓ Статус: НЕТ ДАННЫХ\n\nМы отправили запрос администратору.",
-            parse_mode="HTML"
-        )
-        await save_history(message.from_user.id, barcode, name, brand, "unknown")
-        await message.bot.send_message(
+        result_text = f"{text}\n\n❓ Статус: НЕТ ДАННЫХ\n\nЗапрос отправлен администратору — ожидайте ответа."
+        if is_message:
+            await msg.answer(result_text, parse_mode="HTML", reply_markup=main_menu())
+        else:
+            await msg.edit_text(result_text, parse_mode="HTML")
+        await save_history(user_id, barcode, name, brand, "unknown")
+        await bot.send_message(
             ADMIN_ID,
             f"🔔 Новый товар без статуса!\n\n"
-            f"<b>{name}</b>\nШтрихкод: <code>{barcode}</code>\n\n"
-            f"Добавь через /admin",
-            parse_mode="HTML"
+            f"<b>{name}</b>" + (f" — {brand}" if brand else "") +
+            f"\nШтрихкод: <code>{barcode}</code>\n"
+            f"Пользователь: {user_id}\n\n"
+            f"Выбери статус:",
+            parse_mode="HTML",
+            reply_markup=admin_keyboard(name, brand, user_id)
         )
+
+@router.callback_query(F.data.startswith("setstatus:"))
+async def set_status_from_admin(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    status = parts[1]
+    user_id = int(parts[2])
+    name = parts[3].replace("_", " ")
+    brand = parts[4].replace("_", " ") if len(parts) > 4 else ""
+    await add_product(name, brand, status)
+    status_map = {
+        "halal": "✅ ХАЛАЛ",
+        "haram": "❌ ХАРАМ",
+        "doubtful": "⚠️ СОМНИТЕЛЬНО"
+    }
+    await callback.message.edit_text(
+        f"✅ Статус установлен!\n\n<b>{name}</b>" + (f" — {brand}" if brand else "") +
+        f"\nСтатус: <b>{status_map.get(status)}</b>",
+        parse_mode="HTML"
+    )
+    await callback.bot.send_message(
+        user_id,
+        f"✅ Ответ на ваш запрос:\n\n<b>{name}</b>" + (f" — {brand}" if brand else "") +
+        f"\n\nСтатус: <b>{status_map.get(status)}</b>",
+        parse_mode="HTML"
+    )
 
 @router.callback_query(F.data == "cancel")
 async def cancel(callback: CallbackQuery, state: FSMContext):

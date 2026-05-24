@@ -33,7 +33,7 @@ async def admin_add(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         return
     await state.set_state(AddProduct.name)
-    await callback.message.edit_text("Введи название товара (как оно приходит из Open Food Facts):")
+    await callback.message.edit_text("Введи название товара:")
 
 @router.message(AddProduct.name)
 async def add_name(message: Message, state: FSMContext):
@@ -46,20 +46,21 @@ async def add_brand(message: Message, state: FSMContext):
     await state.update_data(brand=message.text.strip())
     await state.set_state(AddProduct.status)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Халал", callback_data="status_halal")],
-        [InlineKeyboardButton(text="❌ Харам", callback_data="status_haram")],
-        [InlineKeyboardButton(text="⚠️ Сомнительно", callback_data="status_doubtful")],
+        [InlineKeyboardButton(text="✅ Халал", callback_data="astatus_halal")],
+        [InlineKeyboardButton(text="❌ Харам", callback_data="astatus_haram")],
+        [InlineKeyboardButton(text="⚠️ Сомнительно", callback_data="astatus_doubtful")],
     ])
     await message.answer("Выбери статус:", reply_markup=keyboard)
 
-@router.callback_query(F.data.startswith("status_"))
+@router.callback_query(F.data.startswith("astatus_"))
 async def add_status(callback: CallbackQuery, state: FSMContext):
-    status = callback.data.replace("status_", "")
+    status = callback.data.replace("astatus_", "")
     data = await state.get_data()
     await state.clear()
     await add_product(data["name"], data["brand"], status)
+    status_map = {"halal": "✅ Халал", "haram": "❌ Харам", "doubtful": "⚠️ Сомнительно"}
     await callback.message.edit_text(
-        f"✅ Товар добавлен!\n\n<b>{data['name']}</b> — {data['brand']}\nСтатус: {status}",
+        f"✅ Товар добавлен!\n\n<b>{data['name']}</b> — {data['brand']}\nСтатус: {status_map.get(status)}",
         parse_mode="HTML"
     )
 
@@ -75,5 +76,5 @@ async def admin_list(callback: CallbackQuery):
     status_map = {"halal": "✅", "haram": "❌", "doubtful": "⚠️"}
     for p in products[:20]:
         emoji = status_map.get(p["status"], "❓")
-        text += f"{emoji} <b>{p['name']}</b> — {p['brand']}\n"
+        text += f"{emoji} <b>{p['name']}</b> — {p.get('brand', '')}\n"
     await callback.message.edit_text(text, parse_mode="HTML")
