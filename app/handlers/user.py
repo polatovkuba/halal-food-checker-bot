@@ -4,7 +4,8 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from app.keyboards.buttons import main_menu, confirm_barcode, confirm_product
-from app.database.db import get_product, save_history, search_open_food_facts, get_user_history
+from app.database.db import get_product_by_name, save_history, search_open_food_facts, get_user_history
+import os
 import io
 
 try:
@@ -15,6 +16,7 @@ except ImportError:
     BARCODE_ENABLED = False
 
 router = Router()
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 class CheckProduct(StatesGroup):
     waiting_barcode = State()
@@ -23,8 +25,13 @@ class CheckProduct(StatesGroup):
 @router.message(CommandStart())
 async def start(message: Message):
     await message.answer(
-        "🕌 Assalamu Alaikum!\n\nДобро пожаловать в Halal Food Checker!\n\nОтправь штрихкод товара — узнаем халяль он или нет.",
-        reply_markup=main_menu()
+        "🕌 Assalamu Alaikum!\n\n"
+        "Добро пожаловать в Halal Food Checker!\n\n"
+        "Этот бот поможет тебе узнать халяльность продукта по штрихкоду.\n\n"
+        "👨‍💻 Разработчик: <b>Kurban Polatov</b>\n\n"
+        "Отправь штрихкод товара — узнаем халяль он или нет.",
+        reply_markup=main_menu(),
+        parse_mode="HTML"
     )
 
 @router.message(F.text == "⌨️ Ввести вручную")
@@ -40,7 +47,8 @@ async def photo_input(message: Message, state: FSMContext):
 @router.message(CheckProduct.waiting_photo, F.photo)
 async def process_photo(message: Message, state: FSMContext):
     if not BARCODE_ENABLED:
-        await message.answer("❌ Распознавание штрихкода недоступно на сервере. Введи вручную.", reply_markup=main_menu())
+        await state.clear()
+        await message.answer("❌ Распознавание фото недоступно. Введи штрихкод вручную.", reply_markup=main_menu())
         return
     await state.clear()
     photo: PhotoSize = message.photo[-1]
@@ -49,7 +57,7 @@ async def process_photo(message: Message, state: FSMContext):
     image = Image.open(io.BytesIO(file_bytes.read()))
     barcodes = decode(image)
     if not barcodes:
-        await message.answer("❌ Штрихкод не найден на фото. Попробуй ещё раз или введи вручную.", reply_markup=main_menu())
+        await message.answer("❌ Штрихкод не найден. Попробуй ещё раз или введи вручную.", reply_markup=main_menu())
         return
     barcode = barcodes[0].data.decode("utf-8")
     await state.update_data(barcode=barcode)
@@ -74,35 +82,40 @@ async def process_barcode(message: Message, state: FSMContext):
 async def confirmed_barcode(callback: CallbackQuery, state: FSMContext):
     barcode = callback.data.replace("confirm_", "")
     await callback.message.edit_text("🔍 Ищем товар...")
-    product = await get_product(barcode)
-    if not product:
-        product = await search_open_food_facts(barcode)
+    off_product = await search_open_food_facts(barcode)
+    if not off_product or not off_product.get("name"):
+        await callback.message.edit_text("❓ Товар не найден в Open Food Facts.\nСтатус: <b>Нет данных</b>", parse_mode="HTML")
+        return
+    name = off_product["name"]
+    brand = off_product["brand"]
+    product = await get_product_by_name(name, brand)
     if product:
-        await state.update_data(product=product, barcode=barcode)
+        status = product.get("status", "unknown")
+        status_map = {
+            "halal": "✅ ХАЛАЛ",
+            "haram": "❌ ХАРАМ",
+            "doubtful": "⚠️ СОМНИТЕЛЬНО",
+            "unknown": "❓ НЕТ ДАННЫХ"
+        }
         await callback.message.edit_text(
-            f"Нашли товар:\n<b>{product['name']}</b>\n{product.get('brand', '')}",
-            reply_markup=confirm_product(barcode),
+            f"<b>{name}</b> — {brand}\n\nСтатус: <b>{status_map.get(status, '❓ НЕТ ДАННЫХ')}</b>",
             parse_mode="HTML"
         )
+        await save_history(callback.from_user.id, barcode, name, brand, status)
     else:
-        await callback.message.edit_text("❓ Товар не найден в базе.\nСтатус: <b>Нет данных</b>", parse_mode="HTML")
-
-@router.callback_query(F.data.startswith("product_"))
-async def show_status(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    product = data.get("product", {})
-    status = product.get("status", "unknown")
-    status_map = {
-        "halal": "✅ ХАЛАЛ",
-        "haram": "❌ ХАРАМ",
-        "doubtful": "⚠️ СОМНИТЕЛЬНО",
-        "unknown": "❓ НЕТ ДАННЫХ"
-    }
-    await callback.message.edit_text(
-        f"<b>{product.get('name', 'Товар')}</b>\n\nСтатус: <b>{status_map.get(status, '❓ НЕТ ДАННЫХ')}</b>",
-        parse_mode="HTML"
-    )
-    await save_history(callback.from_user.id, data.get("barcode"), product.get("name"), status)
+        await callback.message.edit_text(
+            f"<b>{name}</b> — {brand}\n\n❓ Статус: НЕТ ДАННЫХ",
+            parse_mode="HTML"
+        )
+        await save_history(callback.from_user.id, barcode, name, brand, "unknown")
+        await callback.bot.send_message(
+            ADMIN_ID,
+            f"🔔 Новый товар без статуса!\n\n"
+            f"<b>{name}</b> — {brand}\n"
+            f"Штрихкод: <code>{barcode}</code>\n\n"
+            f"Добавь статус через /admin",
+            parse_mode="HTML"
+        )
 
 @router.callback_query(F.data == "cancel")
 async def cancel(callback: CallbackQuery, state: FSMContext):
@@ -124,7 +137,7 @@ async def history_button(message: Message):
     status_map = {"halal": "✅", "haram": "❌", "doubtful": "⚠️", "unknown": "❓"}
     for h in history:
         emoji = status_map.get(h["status"], "❓")
-        text += f"{emoji} <b>{h['product_name']}</b>\n"
+        text += f"{emoji} <b>{h['product_name']}</b> — {h.get('brand', '')}\n"
         text += f"    {h['barcode']} · {h['checked_at'].strftime('%d.%m %H:%M')}\n\n"
     await message.answer(text, parse_mode="HTML")
 
@@ -138,6 +151,6 @@ async def show_history(message: Message):
     status_map = {"halal": "✅", "haram": "❌", "doubtful": "⚠️", "unknown": "❓"}
     for h in history:
         emoji = status_map.get(h["status"], "❓")
-        text += f"{emoji} <b>{h['product_name']}</b>\n"
+        text += f"{emoji} <b>{h['product_name']}</b> — {h.get('brand', '')}\n"
         text += f"    {h['barcode']} · {h['checked_at'].strftime('%d.%m %H:%M')}\n\n"
     await message.answer(text, parse_mode="HTML")
