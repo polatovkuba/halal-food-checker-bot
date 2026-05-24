@@ -33,17 +33,17 @@ async def admin_add(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         return
     await state.set_state(AddProduct.name)
-    await callback.message.edit_text("Введи название товара:")
+    await callback.message.edit_text("Введи название товара (как оно приходит из Open Food Facts):")
 
 @router.message(AddProduct.name)
 async def add_name(message: Message, state: FSMContext):
-    await state.update_data(name=message.text.strip().lower())
+    await state.update_data(name=message.text.strip())
     await state.set_state(AddProduct.brand)
     await message.answer("Введи бренд товара:")
 
 @router.message(AddProduct.brand)
 async def add_brand(message: Message, state: FSMContext):
-    await state.update_data(brand=message.text.strip().lower())
+    await state.update_data(brand=message.text.strip())
     await state.set_state(AddProduct.status)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Халал", callback_data="status_halal")],
