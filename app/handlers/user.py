@@ -5,9 +5,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from app.keyboards.buttons import main_menu, confirm_barcode, confirm_product
 from app.database.db import get_product, save_history, search_open_food_facts, get_user_history
-from PIL import Image
-from pyzbar.pyzbar import decode
 import io
+
+try:
+    from PIL import Image
+    from pyzbar.pyzbar import decode
+    BARCODE_ENABLED = True
+except ImportError:
+    BARCODE_ENABLED = False
 
 router = Router()
 
@@ -34,6 +39,9 @@ async def photo_input(message: Message, state: FSMContext):
 
 @router.message(CheckProduct.waiting_photo, F.photo)
 async def process_photo(message: Message, state: FSMContext):
+    if not BARCODE_ENABLED:
+        await message.answer("❌ Распознавание штрихкода недоступно на сервере. Введи вручную.", reply_markup=main_menu())
+        return
     await state.clear()
     photo: PhotoSize = message.photo[-1]
     file = await message.bot.get_file(photo.file_id)

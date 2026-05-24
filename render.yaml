@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: halal-food-checker-bot
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_ID
+        sync: false
